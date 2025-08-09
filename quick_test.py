@@ -1,7 +1,9 @@
 # quick_test.py - 快速API测试
+#ok
 import requests
 import json
 import time
+import flask
 
 BASE_URL = "http://localhost:8000"
 
