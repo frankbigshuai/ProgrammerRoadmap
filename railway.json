@@ -4,13 +4,10 @@
       "builder": "NIXPACKS"
     },
     "deploy": {
-      "startCommand": "python -m flask run --host=0.0.0.0 --port=$PORT",
+      "startCommand": "gunicorn --bind 0.0.0.0:$PORT run:app",
       "healthcheckPath": "/health",
       "healthcheckTimeout": 100,
       "restartPolicyType": "ON_FAILURE",
       "restartPolicyMaxRetries": 10
-    },
-    "environments": {
-      "FLASK_APP": "run.py"
     }
   }
