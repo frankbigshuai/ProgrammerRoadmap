@@ -1,4 +1,4 @@
-# app/config.py
+# config.py - Railway兼容版本
 import os
 from dotenv import load_dotenv
 
@@ -12,8 +12,11 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
     
-    # MongoDB 配置
-    MONGO_URI = os.environ.get('MONGODB_URI') or 'mongodb://localhost:27017/programmer_roadmap'
+    # MongoDB 配置 - Railway兼容
+    # Railway提供MONGO_URL，备用MONGODB_URI
+    MONGO_URI = (os.environ.get('MONGO_URL') or 
+                 os.environ.get('MONGODB_URI') or 
+                 'mongodb://localhost:27017/programmer_roadmap')
     MONGO_DBNAME = os.environ.get('MONGODB_DATABASE') or 'programmer_roadmap'
     
     # API配置
@@ -51,4 +54,4 @@ config = {
 def get_config():
     """获取当前环境配置"""
     env = os.environ.get('FLASK_ENV', 'development')
-    return config[env]
+    return config.get(env, config['default'])
