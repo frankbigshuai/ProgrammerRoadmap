@@ -1,4 +1,4 @@
-# app/utils/database.py - 快速修复版
+# app/utils/database.py - MongoDB变量调试版
 import pymongo
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -19,106 +19,178 @@ class MongoWrapper:
 mongo = MongoWrapper()
 
 def init_db(app):
-    """初始化数据库连接 - 快速修复版"""
+    """初始化数据库连接 - 调试版"""
     global _client, _db, mongo
     
     try:
-        app.logger.info("🔄 连接MongoDB...")
+        app.logger.info("🔄 调试MongoDB连接...")
         
-        # 获取并修复URI
-        mongo_uri = _get_fixed_mongo_uri(app)
+        # 显示所有MongoDB相关变量的实际值（用于调试）
+        _debug_mongo_variables(app)
+        
+        # 获取连接URI
+        mongo_uri = _get_correct_mongo_uri(app)
         if not mongo_uri:
             raise ValueError("❌ 无法获取MongoDB连接")
         
-        # 显示连接信息
-        safe_uri = _mask_uri(mongo_uri)
-        app.logger.info(f"📡 连接: {safe_uri}")
+        # 显示将要使用的连接信息
+        app.logger.info(f"📡 尝试连接: {_mask_uri(mongo_uri)}")
         
         # 创建客户端
         _client = MongoClient(mongo_uri, 
-                             connectTimeoutMS=30000,
-                             serverSelectionTimeoutMS=30000,
-                             socketTimeoutMS=30000)
+                             connectTimeoutMS=10000,
+                             serverSelectionTimeoutMS=10000,
+                             socketTimeoutMS=10000)
         
         # 选择数据库
         _db = _client['programmer_roadmap']
         
         # 测试连接
+        app.logger.info("🏓 测试认证...")
         result = _client.admin.command('ping')
         if result.get('ok') == 1:
-            app.logger.info("✅ MongoDB连接成功!")
+            app.logger.info("✅ MongoDB连接和认证成功!")
         
         # 设置全局对象
         mongo.db = _db
         mongo.cx = _client
         
-        # 创建基本结构
-        _setup_basic_structure(app)
-        
         return mongo
         
     except Exception as e:
         app.logger.error(f"❌ MongoDB连接失败: {e}")
+        # 显示可能的解决方案
+        _show_auth_troubleshooting(app)
         raise Exception(f"数据库连接失败: {e}")
 
-def _get_fixed_mongo_uri(app):
-    """获取并修复MongoDB URI"""
+def _debug_mongo_variables(app):
+    """调试MongoDB相关变量"""
     
-    # 方法1: 检查用户设置的MONGO_URI
+    app.logger.info("🔍 MongoDB变量调试信息:")
+    
+    # 所有可能的MongoDB变量名
+    mongo_var_names = [
+        'MONGO_URL',
+        'MONGO_URI', 
+        'MONGODB_URI',
+        'DATABASE_URL',
+        'MONGOHOST',
+        'MONGOPORT',
+        'MONGOUSER',
+        'MONGOPASSWORD',
+        'MONGO_INITDB_ROOT_USERNAME',
+        'MONGO_INITDB_ROOT_PASSWORD',
+        'MONGO_INITDB_DATABASE',
+        'MONGO_INITDB_HOST',
+        'MONGO_INITDB_PORT'
+    ]
+    
+    found_vars = {}
+    for var_name in mongo_var_names:
+        value = os.environ.get(var_name)
+        if value:
+            # 对密码类变量进行部分隐藏
+            if 'password' in var_name.lower() or 'pass' in var_name.lower():
+                display_value = f"{value[:4]}***{value[-4:]}" if len(value) > 8 else "***"
+            else:
+                display_value = value
+            
+            found_vars[var_name] = display_value
+            app.logger.info(f"  ✅ {var_name}: {display_value}")
+        else:
+            app.logger.info(f"  ❌ {var_name}: 未设置")
+    
+    app.logger.info(f"📊 找到 {len(found_vars)} 个MongoDB变量")
+    
+    # 如果没有找到任何变量，显示所有环境变量中包含mongo的
+    if not found_vars:
+        app.logger.warning("⚠️ 未找到标准MongoDB变量，搜索所有相关变量:")
+        for key, value in os.environ.items():
+            if 'mongo' in key.lower():
+                display_value = f"{value[:10]}..." if len(value) > 10 else value
+                app.logger.info(f"  🔍 {key}: {display_value}")
+
+def _get_correct_mongo_uri(app):
+    """获取正确的MongoDB URI"""
+    
+    # 方法1: 检查用户手动设置的MONGO_URI
     mongo_uri = os.environ.get('MONGO_URI')
     if mongo_uri and mongo_uri.startswith('mongodb://'):
-        app.logger.info("✅ 使用MONGO_URI")
+        app.logger.info("✅ 使用手动设置的MONGO_URI")
         return mongo_uri
     
-    # 方法2: 使用Railway的MONGO_URL并修复
-    mongo_url = os.environ.get('MONGO_URL')
-    if mongo_url and mongo_url.startswith('mongodb://'):
-        app.logger.info("✅ 使用MONGO_URL并添加数据库名")
-        # 确保以/结尾，然后添加数据库名
-        if mongo_url.endswith('/'):
-            return mongo_url + 'programmer_roadmap'
-        else:
-            return mongo_url + '/programmer_roadmap'
+    # 方法2: 使用Railway自动提供的变量
+    railway_combinations = [
+        # 组合1: 使用MONGO_URL
+        {
+            'source': 'MONGO_URL',
+            'uri': os.environ.get('MONGO_URL')
+        },
+        # 组合2: 使用标准Railway变量
+        {
+            'source': 'Railway标准变量',
+            'host': os.environ.get('MONGOHOST'),
+            'port': os.environ.get('MONGOPORT', '27017'),
+            'user': os.environ.get('MONGO_INITDB_ROOT_USERNAME'),
+            'pass': os.environ.get('MONGO_INITDB_ROOT_PASSWORD')
+        },
+        # 组合3: 使用简化变量名
+        {
+            'source': 'Railway简化变量',
+            'host': os.environ.get('MONGOHOST'),
+            'port': os.environ.get('MONGOPORT', '27017'),
+            'user': os.environ.get('MONGOUSER'),
+            'pass': os.environ.get('MONGOPASSWORD')
+        }
+    ]
     
-    # 方法3: 从分离变量构建
-    host = os.environ.get('MONGOHOST')
-    port = os.environ.get('MONGOPORT', '27017')
-    user = os.environ.get('MONGO_INITDB_ROOT_USERNAME') or os.environ.get('MONGOUSER')
-    password = os.environ.get('MONGO_INITDB_ROOT_PASSWORD') or os.environ.get('MONGOPASSWORD')
+    for combo in railway_combinations:
+        if 'uri' in combo and combo['uri']:
+            # 直接使用提供的URI
+            uri = combo['uri']
+            if uri.startswith('mongodb://'):
+                # 确保包含数据库名
+                if '/programmer_roadmap' not in uri:
+                    if uri.endswith('/'):
+                        uri += 'programmer_roadmap'
+                    else:
+                        uri += '/programmer_roadmap'
+                app.logger.info(f"✅ 使用{combo['source']}")
+                return uri
+        
+        elif all(key in combo for key in ['host', 'user', 'pass']):
+            # 从分离变量构建URI
+            host = combo['host']
+            port = combo['port']
+            user = combo['user'] 
+            password = combo['pass']
+            
+            if all([host, user, password]):
+                uri = f"mongodb://{user}:{password}@{host}:{port}/programmer_roadmap"
+                app.logger.info(f"✅ 从{combo['source']}构建URI")
+                return uri
     
-    if all([host, user, password]):
-        app.logger.info("✅ 从分离变量构建URI")
-        return f"mongodb://{user}:{password}@{host}:{port}/programmer_roadmap"
-    
-    # 显示调试信息
-    app.logger.error("❌ 无法构建MongoDB URI")
-    app.logger.error("请在Railway中设置以下环境变量:")
-    app.logger.error("MONGO_URI=mongodb://mongo:dRqunCnQiYKlpeNsOxMwECWXMYBjYzjO@mongodb-tyss.railway.internal:27017/programmer_roadmap")
-    
+    app.logger.error("❌ 无法构建有效的MongoDB URI")
     return None
 
-def _setup_basic_structure(app):
-    """设置基本数据库结构"""
-    try:
-        # 创建基本集合
-        collections = ['users', 'questions', 'responses']
-        existing = _db.list_collection_names()
-        
-        for collection in collections:
-            if collection not in existing:
-                _db.create_collection(collection)
-                app.logger.info(f"📁 创建集合: {collection}")
-        
-        # 创建基本索引
-        try:
-            _db.users.create_index("username", unique=True, background=True)
-            _db.users.create_index("email", unique=True, background=True)
-            app.logger.info("✅ 基本索引创建完成")
-        except Exception as e:
-            app.logger.warning(f"⚠️ 索引创建: {e}")
-            
-    except Exception as e:
-        app.logger.warning(f"⚠️ 数据库结构设置: {e}")
+def _show_auth_troubleshooting(app):
+    """显示认证故障排除信息"""
+    
+    app.logger.error("🔐 认证失败故障排除:")
+    app.logger.error("  1. 检查Railway MongoDB服务是否正常运行")
+    app.logger.error("  2. 确认用户名和密码正确")
+    app.logger.error("  3. 重启MongoDB服务")
+    app.logger.error("  4. 检查变量是否从MongoDB服务正确传递")
+    
+    app.logger.error("💡 建议的修复步骤:")
+    app.logger.error("  1. 进入Railway MongoDB服务页面")
+    app.logger.error("  2. 查看Variables标签页的实际值")
+    app.logger.error("  3. 复制正确的连接信息")
+    app.logger.error("  4. 手动设置MONGO_URI环境变量")
+    
+    # 显示建议的URI格式
+    host = os.environ.get('MONGOHOST', 'mongodb-tyss.railway.internal')
+    app.logger.error(f"  建议格式: mongodb://用户名:密码@{host}:27017/programmer_roadmap")
 
 def _mask_uri(uri):
     """隐藏敏感信息"""
