@@ -1,4 +1,4 @@
-# app/utils/database.py - 直接使用PyMongo版本
+# app/utils/database.py - Railway特别优化版本
 import pymongo
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError, ConfigurationError
@@ -6,6 +6,7 @@ import logging
 from datetime import datetime
 import time
 import os
+import re
 
 # 全局数据库连接
 _client = None
@@ -21,77 +22,49 @@ class MongoWrapper:
 mongo = MongoWrapper()
 
 def init_db(app):
-    """初始化数据库连接 - 直接使用PyMongo"""
+    """初始化数据库连接 - Railway优化版本"""
     global _client, _db, mongo
     
     try:
         app.logger.info("🔄 开始初始化数据库连接...")
         
-        # 获取数据库配置
-        mongo_uri = app.config.get('MONGO_URI')
-        if not mongo_uri:
-            # 尝试其他可能的环境变量
-            mongo_uri = (
-                os.environ.get('MONGO_URL') or 
-                os.environ.get('MONGODB_URI') or 
-                os.environ.get('DATABASE_URL')
-            )
+        # 获取数据库配置 - Railway特殊处理
+        mongo_uri = _get_railway_mongo_uri(app)
         
         if not mongo_uri:
-            raise ValueError("❌ 未找到数据库连接字符串")
+            raise ValueError("❌ 未找到有效的数据库连接字符串")
         
         # 显示连接信息（隐藏敏感信息）
         safe_uri = _mask_uri(mongo_uri)
         app.logger.info(f"📡 连接数据库: {safe_uri}")
         
-        # 解析数据库名
-        db_name = app.config.get('MONGO_DBNAME', 'programmer_roadmap')
-        if 'mongodb://' in mongo_uri or 'mongodb+srv://' in mongo_uri:
-            # 从URI中提取数据库名
-            if '/' in mongo_uri.split('?')[0] and mongo_uri.split('?')[0].split('/')[-1]:
-                db_name = mongo_uri.split('?')[0].split('/')[-1]
-        
+        # 解析并修复数据库名
+        db_name, fixed_uri = _parse_and_fix_uri(mongo_uri, app)
         app.logger.info(f"📊 目标数据库: {db_name}")
         
-        # 配置连接选项
+        # Railway优化的连接选项
         connect_options = {
-            'connectTimeoutMS': 10000,  # 10秒连接超时
-            'serverSelectionTimeoutMS': 10000,  # 10秒服务器选择超时
-            'socketTimeoutMS': 10000,  # 10秒socket超时
-            'maxPoolSize': 10,
+            'connectTimeoutMS': 15000,  # 15秒连接超时 (Railway网络可能较慢)
+            'serverSelectionTimeoutMS': 15000,  # 15秒服务器选择超时
+            'socketTimeoutMS': 15000,  # 15秒socket超时
+            'maxPoolSize': 5,  # Railway资源有限，减少连接池
             'minPoolSize': 1,
             'retryWrites': True,
-            'w': 'majority'
+            'retryReads': True,
+            'maxIdleTimeMS': 30000,  # 30秒空闲超时
+            'heartbeatFrequencyMS': 10000,  # 10秒心跳频率
         }
         
         # 创建MongoDB客户端
         app.logger.info("🏗️ 创建MongoDB客户端...")
-        _client = MongoClient(mongo_uri, **connect_options)
+        _client = MongoClient(fixed_uri, **connect_options)
         
         # 获取数据库对象
         _db = _client[db_name]
         
-        # 测试连接
+        # 测试连接 - 增加重试和超时处理
         app.logger.info("🏓 测试数据库连接...")
-        for attempt in range(3):
-            try:
-                start_time = time.time()
-                # 使用admin数据库进行ping测试
-                result = _client.admin.command('ping')
-                response_time = (time.time() - start_time) * 1000
-                
-                if result.get('ok') == 1:
-                    app.logger.info(f"✅ 数据库连接成功! (响应时间: {response_time:.2f}ms)")
-                    break
-                else:
-                    raise ConnectionFailure("Ping命令返回失败")
-                    
-            except Exception as e:
-                if attempt < 2:
-                    app.logger.warning(f"⚠️ 连接尝试 {attempt + 1} 失败，重试中... ({e})")
-                    time.sleep(2)
-                else:
-                    raise e
+        _test_connection(app, max_attempts=5, delay=3)
         
         # 设置全局mongo对象
         mongo.db = _db
@@ -114,20 +87,121 @@ def init_db(app):
         
         return mongo
         
-    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
-        error_msg = f"MongoDB 连接失败: {str(e)}"
-        app.logger.error(f"❌ {error_msg}")
-        raise Exception(error_msg)
-        
-    except ConfigurationError as e:
-        error_msg = f"MongoDB 配置错误: {str(e)}"
-        app.logger.error(f"❌ {error_msg}")
-        raise Exception(error_msg)
-        
     except Exception as e:
         error_msg = f"数据库初始化失败: {str(e)}"
         app.logger.error(f"❌ {error_msg}")
+        
+        # 如果是Railway环境，提供更多调试信息
+        if os.environ.get('RAILWAY_ENVIRONMENT'):
+            app.logger.error("🚂 Railway环境调试信息:")
+            app.logger.error(f"  - MONGO_URL: {'✅ 已设置' if os.environ.get('MONGO_URL') else '❌ 未设置'}")
+            app.logger.error(f"  - MONGO_URI: {'✅ 已设置' if os.environ.get('MONGO_URI') else '❌ 未设置'}")
+            app.logger.error(f"  - DATABASE_URL: {'✅ 已设置' if os.environ.get('DATABASE_URL') else '❌ 未设置'}")
+        
         raise Exception(error_msg)
+
+def _get_railway_mongo_uri(app):
+    """获取Railway环境的MongoDB URI"""
+    # Railway可能的环境变量名
+    possible_vars = [
+        'MONGO_URI',      # 用户设置的
+        'MONGO_URL',      # Railway MongoDB服务
+        'DATABASE_URL',   # 通用数据库URL
+        'MONGODB_URI',    # 另一种常见命名
+        'MONGODB_URL'     # 另一种常见命名
+    ]
+    
+    for var_name in possible_vars:
+        uri = os.environ.get(var_name) or app.config.get(var_name)
+        if uri:
+            app.logger.info(f"📋 使用环境变量: {var_name}")
+            
+            # 处理Railway模板语法
+            if '${' in uri and '}' in uri:
+                # 尝试解析Railway模板
+                app.logger.warning(f"⚠️ 检测到模板语法: {uri}")
+                # 提取模板变量名
+                match = re.search(r'\$\{\{([^}]+)\}\}', uri)
+                if match:
+                    template_var = match.group(1).split('.')[-1]  # 取最后一部分
+                    actual_value = os.environ.get(template_var)
+                    if actual_value:
+                        uri = actual_value
+                        app.logger.info(f"✅ 模板解析成功: {template_var}")
+                    else:
+                        app.logger.error(f"❌ 模板变量未找到: {template_var}")
+                        continue
+            
+            return uri
+    
+    # 如果都没找到，尝试构建默认URI
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        app.logger.warning("⚠️ 未找到明确的MongoDB URI，尝试默认配置")
+        # Railway内部MongoDB的默认格式
+        default_uri = "mongodb://mongo:27017/programmer_roadmap"
+        app.logger.info(f"🔧 尝试默认URI: {default_uri}")
+        return default_uri
+    
+    return None
+
+def _parse_and_fix_uri(mongo_uri, app):
+    """解析并修复MongoDB URI"""
+    try:
+        # 提取数据库名
+        db_name = 'programmer_roadmap'  # 默认数据库名
+        
+        # 从URI中提取数据库名
+        if '/' in mongo_uri:
+            uri_parts = mongo_uri.split('?')[0]  # 移除查询参数
+            path_part = uri_parts.split('/')[-1]  # 获取路径的最后部分
+            if path_part and path_part != '':
+                db_name = path_part
+                app.logger.info(f"📊 从URI提取数据库名: {db_name}")
+        
+        # 如果URI没有包含数据库名，添加它
+        fixed_uri = mongo_uri
+        if not mongo_uri.rstrip('/').split('/')[-1] or mongo_uri.endswith('/'):
+            if mongo_uri.endswith('/'):
+                fixed_uri = mongo_uri + db_name
+            else:
+                fixed_uri = mongo_uri + '/' + db_name
+            app.logger.info(f"🔧 修复URI，添加数据库名")
+        
+        # 确保有必要的连接参数
+        if 'mongodb+srv://' not in fixed_uri:
+            if '?' not in fixed_uri:
+                fixed_uri += '?retryWrites=true&w=majority'
+            elif 'retryWrites' not in fixed_uri:
+                fixed_uri += '&retryWrites=true&w=majority'
+        
+        return db_name, fixed_uri
+        
+    except Exception as e:
+        app.logger.warning(f"⚠️ URI解析警告: {e}")
+        return 'programmer_roadmap', mongo_uri
+
+def _test_connection(app, max_attempts=5, delay=3):
+    """测试数据库连接"""
+    for attempt in range(max_attempts):
+        try:
+            start_time = time.time()
+            # 使用admin数据库进行ping测试
+            result = _client.admin.command('ping')
+            response_time = (time.time() - start_time) * 1000
+            
+            if result.get('ok') == 1:
+                app.logger.info(f"✅ 数据库连接成功! (响应时间: {response_time:.2f}ms)")
+                return True
+            else:
+                raise ConnectionFailure("Ping命令返回失败")
+                
+        except Exception as e:
+            if attempt < max_attempts - 1:
+                app.logger.warning(f"⚠️ 连接尝试 {attempt + 1} 失败，{delay}秒后重试... ({e})")
+                time.sleep(delay)
+            else:
+                app.logger.error(f"❌ 所有连接尝试都失败了")
+                raise e
 
 def _mask_uri(uri):
     """隐藏URI中的敏感信息"""
@@ -139,7 +213,7 @@ def _mask_uri(uri):
                 prefix = parts[0].split('//')[0] + '//'
                 masked_auth = '***:***'
                 return prefix + masked_auth + '@' + parts[1]
-        return uri[:30] + '...' if len(uri) > 30 else uri
+        return uri[:50] + '...' if len(uri) > 50 else uri
     except:
         return 'mongodb://***'
 
