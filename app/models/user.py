@@ -1,4 +1,4 @@
-# app/models/user.py
+# app/models/user.py - 带降级模式
 from werkzeug.security import generate_password_hash, check_password_hash
 from bson import ObjectId
 from datetime import datetime, timedelta
@@ -18,9 +18,20 @@ class User:
         return mongo
 
     @staticmethod
+    def _check_db_available():
+        """检查数据库是否可用"""
+        from app.utils.database import is_db_available
+        return is_db_available()
+
+    @staticmethod
     def create(username: str, email: str, password: str) -> Optional[str]:
         """创建新用户"""
         try:
+            # 检查数据库可用性
+            if not User._check_db_available():
+                print("数据库服务暂不可用")
+                return None
+                
             mongo = User._get_mongo()
             
             # 验证邮箱格式
@@ -57,6 +68,10 @@ class User:
     def verify_login(username: str, password: str) -> Optional[str]:
         """通过用户名验证登录"""
         try:
+            if not User._check_db_available():
+                print("数据库服务暂不可用")
+                return None
+                
             mongo = User._get_mongo()
             user = mongo.db.users.find_one({"username": username, "is_active": True})
             if user and check_password_hash(user["password_hash"], password):
@@ -72,6 +87,10 @@ class User:
     def verify_email_login(email: str, password: str) -> Optional[str]:
         """通过邮箱验证登录"""
         try:
+            if not User._check_db_available():
+                print("数据库服务暂不可用")
+                return None
+                
             mongo = User._get_mongo()
             user = mongo.db.users.find_one({"email": email, "is_active": True})
             if user and check_password_hash(user["password_hash"], password):
@@ -87,6 +106,17 @@ class User:
     def get_profile(user_id: str) -> Optional[Dict]:
         """获取用户资料"""
         try:
+            if not User._check_db_available():
+                # 返回降级模式的用户信息
+                return {
+                    "_id": user_id,
+                    "username": "demo_user",
+                    "email": "demo@example.com",
+                    "questionnaire_completed": False,
+                    "created_at": datetime.utcnow(),
+                    "is_demo": True
+                }
+                
             mongo = User._get_mongo()
             user = mongo.db.users.find_one(
                 {"_id": ObjectId(user_id), "is_active": True},
@@ -105,6 +135,10 @@ class User:
     def mark_questionnaire_completed(user_id: str) -> bool:
         """标记问卷已完成"""
         try:
+            if not User._check_db_available():
+                print("数据库服务暂不可用")
+                return False
+                
             mongo = User._get_mongo()
             result = mongo.db.users.update_one(
                 {"_id": ObjectId(user_id)},
@@ -125,6 +159,9 @@ class User:
     def has_completed_questionnaire(user_id: str) -> bool:
         """检查用户是否已完成问卷"""
         try:
+            if not User._check_db_available():
+                return False
+                
             mongo = User._get_mongo()
             user = mongo.db.users.find_one(
                 {"_id": ObjectId(user_id)},
@@ -172,6 +209,10 @@ class User:
     def change_password(user_id: str, old_password: str, new_password: str) -> bool:
         """修改密码"""
         try:
+            if not User._check_db_available():
+                print("数据库服务暂不可用")
+                return False
+                
             mongo = User._get_mongo()
             user = mongo.db.users.find_one({"_id": ObjectId(user_id)})
             if not user or not check_password_hash(user["password_hash"], old_password):
@@ -202,6 +243,10 @@ class User:
     def deactivate(user_id: str) -> bool:
         """停用账户（软删除）"""
         try:
+            if not User._check_db_available():
+                print("数据库服务暂不可用")
+                return False
+                
             mongo = User._get_mongo()
             result = mongo.db.users.update_one(
                 {"_id": ObjectId(user_id)},

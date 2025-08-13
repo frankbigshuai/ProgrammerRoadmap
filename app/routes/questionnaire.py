@@ -1,3 +1,4 @@
+# app/routes/questionnaire.py - 带降级模式
 from flask import Blueprint, request, jsonify, current_app
 from app.models.user import User
 from app.models.question import Question
@@ -17,6 +18,11 @@ def verify_token_and_get_user():
         return None, {'success': False, 'message': '令牌无效或已过期'}, 401
     
     return user_id, None, None
+
+def _check_db_available():
+    """检查数据库是否可用"""
+    from app.utils.database import is_db_available
+    return is_db_available()
 
 @questionnaire_bp.route('/questions', methods=['GET'])
 def get_questions():
@@ -45,8 +51,8 @@ def get_questions():
                 'message': '暂无可用问题'
             }), 404
         
-        # 如果用户已登录，添加用户的已有答案
-        if user_id:
+        # 如果用户已登录且数据库可用，添加用户的已有答案
+        if user_id and _check_db_available():
             user_responses = Response.get_user_responses(user_id)
             response_dict = {resp['question_id']: resp for resp in user_responses}
             
@@ -57,8 +63,14 @@ def get_questions():
             # 获取进度信息
             progress = Response.get_user_progress(user_id)
         else:
-            # 未登录用户
-            progress = None
+            # 未登录用户或降级模式
+            progress = {
+                "total_questions": len(questions),
+                "answered_count": 0,
+                "progress_percentage": 0,
+                "is_completed": False,
+                "is_demo_mode": not _check_db_available()
+            }
             for question in questions:
                 question['user_answer'] = None
         
@@ -70,7 +82,8 @@ def get_questions():
                 'total_questions': len(questions),
                 'progress': progress,
                 'user_id': user_id,
-                'category': category
+                'category': category,
+                'is_demo_mode': not _check_db_available()
             }
         }), 200
         
@@ -108,7 +121,8 @@ def get_categories():
             'message': '获取分类成功',
             'data': {
                 'categories': result,
-                'total_categories': len(result)
+                'total_categories': len(result),
+                'is_demo_mode': not _check_db_available()
             }
         }), 200
         
@@ -118,7 +132,6 @@ def get_categories():
             'message': f'获取分类失败: {str(e)}'
         }), 500
 
-
 @questionnaire_bp.route('/status', methods=['GET'])
 def get_questionnaire_status():
     """获取问卷状态"""
@@ -127,6 +140,28 @@ def get_questionnaire_status():
         user_id, error_response, status_code = verify_token_and_get_user()
         if error_response:
             return jsonify(error_response), status_code
+        
+        # 检查数据库可用性
+        if not _check_db_available():
+            return jsonify({
+                'success': True,
+                'message': '获取状态成功（降级模式）',
+                'data': {
+                    'overall_progress': {
+                        "total_questions": 3,
+                        "answered_count": 0,
+                        "progress_percentage": 0,
+                        "is_completed": False,
+                        "is_demo_mode": True
+                    },
+                    'category_progress': {
+                        "skill_assessment": {"total_questions": 1, "answered_questions": 0, "is_completed": False},
+                        "interest_preference": {"total_questions": 1, "answered_questions": 0, "is_completed": False},
+                        "career_goal": {"total_questions": 1, "answered_questions": 0, "is_completed": False}
+                    },
+                    'is_demo_mode': True
+                }
+            }), 200
         
         # 获取进度
         progress = Response.get_user_progress(user_id)
@@ -150,7 +185,8 @@ def get_questionnaire_status():
             'message': '获取状态成功',
             'data': {
                 'overall_progress': progress,
-                'category_progress': category_progress
+                'category_progress': category_progress,
+                'is_demo_mode': False
             }
         }), 200
         

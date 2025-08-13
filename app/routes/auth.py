@@ -1,14 +1,27 @@
-# app/routes/auth.py
+# app/routes/auth.py - 带降级模式
 from flask import Blueprint, request, jsonify, current_app
 from app.models.user import User
 import re
 
 auth_bp = Blueprint('auth', __name__)
 
+def _check_db_available():
+    """检查数据库是否可用"""
+    from app.utils.database import is_db_available
+    return is_db_available()
+
 @auth_bp.route('/register', methods=['POST'])
 def register():
     """用户注册"""
     try:
+        # 检查数据库可用性
+        if not _check_db_available():
+            return jsonify({
+                'success': False,
+                'message': '注册服务暂时不可用，请稍后重试',
+                'error_code': 'SERVICE_UNAVAILABLE'
+            }), 503
+        
         data = request.get_json()
         
         # 获取参数
@@ -57,7 +70,7 @@ def register():
         else:
             return jsonify({
                 'success': False,
-                'message': '用户名或邮箱已存在'
+                'message': '用户名或邮箱已存在，或注册服务暂时不可用'
             }), 400
             
     except Exception as e:
@@ -70,6 +83,14 @@ def register():
 def login():
     """用户登录"""
     try:
+        # 检查数据库可用性
+        if not _check_db_available():
+            return jsonify({
+                'success': False,
+                'message': '登录服务暂时不可用，请稍后重试',
+                'error_code': 'SERVICE_UNAVAILABLE'
+            }), 503
+        
         data = request.get_json()
         
         # 获取参数
@@ -112,7 +133,8 @@ def login():
                     'username': user_profile['username'],
                     'email': user_profile['email'],
                     'questionnaire_completed': user_profile.get('questionnaire_completed', False),
-                    'token': token
+                    'token': token,
+                    'is_demo': user_profile.get('is_demo', False)
                 }
             }), 200
         else:
@@ -149,6 +171,22 @@ def get_profile():
                 'message': '令牌无效或已过期'
             }), 401
         
+        # 检查数据库可用性
+        if not _check_db_available():
+            # 返回降级模式的用户信息
+            return jsonify({
+                'success': True,
+                'message': '获取成功（降级模式）',
+                'data': {
+                    'user_id': user_id,
+                    'username': 'demo_user',
+                    'email': 'demo@example.com',
+                    'questionnaire_completed': False,
+                    'created_at': None,
+                    'is_demo': True
+                }
+            }), 200
+        
         # 获取用户信息
         user_profile = User.get_profile(user_id)
         if not user_profile:
@@ -165,7 +203,8 @@ def get_profile():
                 'username': user_profile['username'],
                 'email': user_profile['email'],
                 'questionnaire_completed': user_profile.get('questionnaire_completed', False),
-                'created_at': user_profile.get('created_at')
+                'created_at': user_profile.get('created_at'),
+                'is_demo': user_profile.get('is_demo', False)
             }
         }), 200
         
@@ -173,4 +212,31 @@ def get_profile():
         return jsonify({
             'success': False,
             'message': f'获取用户信息失败: {str(e)}'
+        }), 500
+
+@auth_bp.route('/demo-login', methods=['POST'])
+def demo_login():
+    """演示模式登录（数据库不可用时使用）"""
+    try:
+        # 生成演示用户Token
+        demo_user_id = "demo_user_123"
+        token = User.generate_token(demo_user_id, current_app.config['SECRET_KEY'])
+        
+        return jsonify({
+            'success': True,
+            'message': '演示模式登录成功',
+            'data': {
+                'user_id': demo_user_id,
+                'username': 'demo_user',
+                'email': 'demo@example.com',
+                'questionnaire_completed': False,
+                'token': token,
+                'is_demo': True
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'演示登录失败: {str(e)}'
         }), 500

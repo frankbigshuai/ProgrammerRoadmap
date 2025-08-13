@@ -1,4 +1,4 @@
-# app/__init__.py - Railway 优化版本
+# app/__init__.py - 更新健康检查版本
 from flask import Flask
 from flask_cors import CORS
 from app.utils.database import init_db
@@ -20,15 +20,13 @@ def create_app():
     # 配置日志
     _setup_logging(app)
     
-    # 初始化数据库
+    # 初始化数据库 - 使用优雅降级
     try:
         init_db(app)
-        app.logger.info("✅ 数据库初始化成功")
+        app.logger.info("✅ 数据库初始化完成")
     except Exception as e:
-        app.logger.error(f"❌ 数据库初始化失败: {e}")
-        # 在生产环境中，如果数据库连接失败，应该让应用启动失败
-        if not app.config.get('DEBUG'):
-            raise e
+        app.logger.warning(f"⚠️ 数据库初始化失败，启用降级模式: {e}")
+        # 不抛出异常，让应用继续运行
     
     # 注册蓝图
     _register_blueprints(app)
@@ -85,6 +83,14 @@ def _register_error_handlers(app):
             'error_code': 500
         }, 500
     
+    @app.errorhandler(503)
+    def service_unavailable(error):
+        return {
+            'success': False,
+            'message': '服务暂时不可用，请稍后重试',
+            'error_code': 503
+        }, 503
+    
     @app.errorhandler(400)
     def bad_request(error):
         return {
@@ -134,32 +140,49 @@ def _register_health_check(app):
     
     @app.route('/')
     def index():
+        from app.utils.database import is_db_available
+        
+        db_status = "connected" if is_db_available() else "degraded"
+        
         return {
             'message': 'ProgrammerRoadmap API is running!',
             'version': app.config.get('API_VERSION', 'v1'),
             'service': 'ProgrammerRoadmap API',
             'status': 'healthy',
+            'database_status': db_status,
             'endpoints': {
                 'health': '/health',
                 'auth': '/api/v1/auth',
                 'questionnaire': '/api/v1/questionnaire', 
                 'responses': '/api/v1/responses',
                 'recommendations': '/api/v1/recommendations'
-            }
+            },
+            'demo_endpoints': {
+                'demo_login': '/api/v1/auth/demo-login',
+                'demo_submit': '/api/v1/responses/demo-submit'
+            } if not is_db_available() else {}
         }
     
     @app.route('/health')
     def health_check():
         try:
-            from app.utils.database import health_check as db_health_check
+            from app.utils.database import health_check as db_health_check, is_db_available
             
             db_health = db_health_check()
+            overall_status = 'healthy' if db_health['status'] == 'healthy' else 'degraded'
             
             return {
-                'status': 'healthy' if db_health['status'] == 'healthy' else 'unhealthy',
+                'status': overall_status,
                 'service': 'ProgrammerRoadmap API',
                 'version': app.config.get('API_VERSION', 'v1'),
                 'database': db_health,
+                'database_available': is_db_available(),
+                'features': {
+                    'user_registration': is_db_available(),
+                    'questionnaire_demo': True,
+                    'recommendation_engine': True,
+                    'data_persistence': is_db_available()
+                },
                 'timestamp': db_health.get('timestamp')
             }
         except Exception as e:
@@ -167,5 +190,6 @@ def _register_health_check(app):
             return {
                 'status': 'error',
                 'message': str(e),
-                'service': 'ProgrammerRoadmap API'
+                'service': 'ProgrammerRoadmap API',
+                'database_available': False
             }, 503

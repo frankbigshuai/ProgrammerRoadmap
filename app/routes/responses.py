@@ -1,3 +1,4 @@
+# app/routes/responses.py - 带降级模式
 from flask import Blueprint, request, jsonify, current_app
 from app.models.user import User
 from app.models.question import Question
@@ -18,6 +19,11 @@ def verify_token_and_get_user():
     
     return user_id, None, None
 
+def _check_db_available():
+    """检查数据库是否可用"""
+    from app.utils.database import is_db_available
+    return is_db_available()
+
 @responses_bp.route('/submit', methods=['POST'])
 def submit_answer():
     """提交单个问题的答案"""
@@ -26,6 +32,14 @@ def submit_answer():
         user_id, error_response, status_code = verify_token_and_get_user()
         if error_response:
             return jsonify(error_response), status_code
+        
+        # 检查数据库可用性
+        if not _check_db_available():
+            return jsonify({
+                'success': False,
+                'message': '答案提交服务暂时不可用，请稍后重试',
+                'error_code': 'SERVICE_UNAVAILABLE'
+            }), 503
         
         data = request.get_json()
         
@@ -107,6 +121,14 @@ def submit_batch_answers():
         user_id, error_response, status_code = verify_token_and_get_user()
         if error_response:
             return jsonify(error_response), status_code
+        
+        # 检查数据库可用性
+        if not _check_db_available():
+            return jsonify({
+                'success': False,
+                'message': '批量提交服务暂时不可用，请稍后重试',
+                'error_code': 'SERVICE_UNAVAILABLE'
+            }), 503
         
         data = request.get_json()
         answers = data.get('answers', [])
@@ -206,7 +228,8 @@ def get_my_answers():
             'message': '获取答案成功',
             'data': {
                 'responses': responses,
-                'count': len(responses)
+                'count': len(responses),
+                'is_demo_mode': not _check_db_available()
             }
         }), 200
         
@@ -273,11 +296,19 @@ def reset_answers():
         if error_response:
             return jsonify(error_response), status_code
         
+        # 检查数据库可用性
+        if not _check_db_available():
+            return jsonify({
+                'success': False,
+                'message': '重置服务暂时不可用，请稍后重试',
+                'error_code': 'SERVICE_UNAVAILABLE'
+            }), 503
+        
         # 删除用户答案
         success = Response.delete_user_responses(user_id)
         
         if success:
-            # 重置用户问卷状态 - 修复User.update_one调用
+            # 重置用户问卷状态
             from app.models.user import User
             from bson import ObjectId
             mongo = Response._get_mongo()
@@ -303,4 +334,49 @@ def reset_answers():
         return jsonify({
             'success': False,
             'message': f'重置答案失败: {str(e)}'
+        }), 500
+
+@responses_bp.route('/demo-submit', methods=['POST'])
+def demo_submit_answer():
+    """演示模式提交答案（数据库不可用时使用）"""
+    try:
+        # 验证用户身份
+        user_id, error_response, status_code = verify_token_and_get_user()
+        if error_response:
+            return jsonify(error_response), status_code
+        
+        data = request.get_json()
+        question_id = data.get('question_id')
+        answer_value = data.get('answer_value')
+        answer_text = data.get('answer_text')
+        
+        if not question_id or not answer_value:
+            return jsonify({
+                'success': False,
+                'message': '问题ID和答案不能为空'
+            }), 400
+        
+        # 在演示模式中，只验证格式，不实际保存
+        return jsonify({
+            'success': True,
+            'message': '答案提交成功（演示模式）',
+            'data': {
+                'question_id': question_id,
+                'answer_value': answer_value,
+                'answer_text': answer_text,
+                'progress': {
+                    "total_questions": 3,
+                    "answered_count": 1,
+                    "progress_percentage": 33.3,
+                    "is_completed": False,
+                    "is_demo_mode": True
+                },
+                'is_demo': True
+            }
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'message': f'演示提交失败: {str(e)}'
         }), 500

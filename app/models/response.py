@@ -1,3 +1,4 @@
+# app/models/response.py - 带降级模式
 from bson import ObjectId
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -14,10 +15,20 @@ class Response:
         return mongo
 
     @staticmethod
+    def _check_db_available():
+        """检查数据库是否可用"""
+        from app.utils.database import is_db_available
+        return is_db_available()
+
+    @staticmethod
     def save_answer(user_id: str, question_id: str, answer_value: str, 
                    answer_text: str = None) -> bool:
         """保存用户答案 - 支持复杂数据结构"""
         try:
+            if not Response._check_db_available():
+                print("数据库服务暂不可用")
+                return False
+                
             mongo = Response._get_mongo()
             
             # 获取问题信息用于解析答案
@@ -88,6 +99,10 @@ class Response:
     def get_user_responses(user_id: str) -> List[Dict]:
         """获取用户的所有答案"""
         try:
+            if not Response._check_db_available():
+                print("数据库服务暂不可用，返回空答案列表")
+                return []
+                
             mongo = Response._get_mongo()
             responses = list(mongo.db.responses.find(
                 {"user_id": str(user_id)}
@@ -107,6 +122,9 @@ class Response:
     def get_responses_by_category(user_id: str, category: str) -> List[Dict]:
         """根据问题类别获取用户答案"""
         try:
+            if not Response._check_db_available():
+                return []
+                
             mongo = Response._get_mongo()
             responses = list(mongo.db.responses.find({
                 "user_id": str(user_id),
@@ -126,6 +144,9 @@ class Response:
     def get_user_response_by_question(user_id: str, question_id: str) -> Optional[Dict]:
         """获取用户对特定问题的答案"""
         try:
+            if not Response._check_db_available():
+                return None
+                
             mongo = Response._get_mongo()
             response = mongo.db.responses.find_one({
                 "user_id": str(user_id),
@@ -144,6 +165,9 @@ class Response:
     def count_user_responses(user_id: str) -> int:
         """统计用户已回答的问题数量"""
         try:
+            if not Response._check_db_available():
+                return 0
+                
             mongo = Response._get_mongo()
             count = mongo.db.responses.count_documents({"user_id": str(user_id)})
             print(f"用户 {user_id} 已回答 {count} 个问题")
@@ -171,7 +195,8 @@ class Response:
                 "total_questions": total_questions,
                 "answered_count": answered_count,
                 "progress_percentage": round(progress_percentage, 1),
-                "is_completed": answered_count >= total_questions
+                "is_completed": answered_count >= total_questions,
+                "is_demo_mode": not Response._check_db_available()
             }
             
             print(f"用户进度: {progress_percentage:.1f}%")
@@ -182,13 +207,29 @@ class Response:
                 "total_questions": 0,
                 "answered_count": 0,
                 "progress_percentage": 0,
-                "is_completed": False
+                "is_completed": False,
+                "is_demo_mode": True
             }
 
     @staticmethod
     def get_user_profile_data(user_id: str) -> Dict:
         """获取用户完整画像数据"""
         try:
+            if not Response._check_db_available():
+                return {
+                    "user_id": user_id,
+                    "profile_data": {
+                        "skill_assessment": [],
+                        "interest_preference": [],
+                        "career_goal": [],
+                        "learning_style": [],
+                        "time_planning": []
+                    },
+                    "total_responses": 0,
+                    "completed_categories": [],
+                    "is_demo_mode": True
+                }
+            
             all_responses = Response.get_user_responses(user_id)
             
             # 按类别分组答案
@@ -209,16 +250,33 @@ class Response:
                 "user_id": user_id,
                 "profile_data": profile_data,
                 "total_responses": len(all_responses),
-                "completed_categories": [k for k, v in profile_data.items() if len(v) > 0]
+                "completed_categories": [k for k, v in profile_data.items() if len(v) > 0],
+                "is_demo_mode": False
             }
         except Exception as e:
             print(f"获取用户画像失败: {e}")
-            return {"user_id": user_id, "profile_data": {}, "total_responses": 0}
+            return {
+                "user_id": user_id, 
+                "profile_data": {
+                    "skill_assessment": [],
+                    "interest_preference": [],
+                    "career_goal": [],
+                    "learning_style": [],
+                    "time_planning": []
+                },
+                "total_responses": 0,
+                "completed_categories": [],
+                "is_demo_mode": True
+            }
 
     @staticmethod
     def delete_user_responses(user_id: str) -> bool:
         """删除用户的所有答案（重新开始问卷时使用）"""
         try:
+            if not Response._check_db_available():
+                print("数据库服务暂不可用")
+                return False
+                
             mongo = Response._get_mongo()
             result = mongo.db.responses.delete_many({"user_id": str(user_id)})
             
@@ -233,6 +291,18 @@ class Response:
     def get_responses_for_recommendation(user_id: str) -> Dict:
         """获取用于推荐算法的答案数据"""
         try:
+            if not Response._check_db_available():
+                return {
+                    "user_id": user_id,
+                    "skill_assessment": {"frontend": {"level": 0.3, "foundation": 0.3}},
+                    "interest_preference": {"frontend": 0.8, "backend": 0.4},
+                    "career_goal": {"goals": [{"timeline": "short", "focus": "employment"}]},
+                    "learning_style": {"styles": [{"hands_on": 0.8, "video": 0.6}]},
+                    "time_planning": {"plans": [{"hours_per_week": 10, "intensity": "medium"}]},
+                    "response_count": 3,
+                    "is_demo_mode": True
+                }
+            
             profile_data = Response.get_user_profile_data(user_id)
             
             # 处理各类别数据
@@ -249,14 +319,15 @@ class Response:
                 "career_goal": goal_profile,
                 "learning_style": style_profile,
                 "time_planning": time_profile,
-                "response_count": profile_data["total_responses"]
+                "response_count": profile_data["total_responses"],
+                "is_demo_mode": profile_data.get("is_demo_mode", False)
             }
             
             print(f"推荐数据准备完成，总回答数: {profile_data['total_responses']}")
             return result
         except Exception as e:
             print(f"获取推荐数据失败: {e}")
-            return {"user_id": user_id, "response_count": 0}
+            return {"user_id": user_id, "response_count": 0, "is_demo_mode": True}
 
     @staticmethod
     def _process_skill_assessment(responses: List[Dict]) -> Dict:
@@ -330,4 +401,3 @@ class Response:
             if time_mapping:
                 plans.append(time_mapping)
         return {"plans": plans}
-

@@ -1,4 +1,4 @@
-# app/utils/database.py - Railway 优化版本
+# app/utils/database.py - 优雅降级版
 import pymongo
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -10,17 +10,19 @@ import os
 # 全局数据库连接
 _client = None
 _db = None
+_db_available = False
 
 class MongoWrapper:
     def __init__(self):
         self.db = None
         self.cx = None
+        self.available = False
 
 mongo = MongoWrapper()
 
 def init_db(app):
-    """初始化数据库连接 - Railway 优化版"""
-    global _client, _db, mongo
+    """初始化数据库连接 - 优雅降级版"""
+    global _client, _db, _db_available, mongo
     
     try:
         app.logger.info("🔄 初始化MongoDB连接...")
@@ -30,7 +32,7 @@ def init_db(app):
         if not mongo_uri:
             raise ValueError("❌ 无法获取MongoDB连接配置")
         
-        # 显示连接信息（隐藏敏感信息）
+        # 显示连接信息
         app.logger.info(f"📡 连接数据库: {_mask_uri(mongo_uri)}")
         
         # 创建客户端
@@ -46,29 +48,50 @@ def init_db(app):
         # 选择数据库
         _db = _client['programmer_roadmap']
         
-        # 测试连接
+        # 尝试测试连接
         app.logger.info("🏓 测试数据库连接...")
-        result = _client.admin.command('ping')
-        if result.get('ok') == 1:
-            app.logger.info("✅ MongoDB连接成功!")
+        try:
+            result = _client.admin.command('ping')
+            if result.get('ok') == 1:
+                app.logger.info("✅ MongoDB连接和认证成功!")
+                _db_available = True
+                mongo.available = True
+                
+                # 创建索引
+                _create_indexes(app)
+            else:
+                raise Exception("Ping 命令返回失败")
+                
+        except Exception as auth_error:
+            app.logger.warning(f"⚠️ MongoDB认证失败，启用降级模式: {auth_error}")
+            app.logger.info("📝 应用将在降级模式下运行，数据库操作会返回友好错误")
+            _db_available = False
+            mongo.available = False
         
-        # 设置全局对象
+        # 无论认证是否成功，都设置连接对象
         mongo.db = _db
         mongo.cx = _client
-        
-        # 创建必要的索引
-        _create_indexes(app)
         
         return mongo
         
     except Exception as e:
         app.logger.error(f"❌ MongoDB连接失败: {e}")
+        
+        # 设置降级模式
+        app.logger.warning("⚠️ 启用数据库降级模式")
+        _db_available = False
+        mongo.available = False
+        mongo.db = None
+        mongo.cx = None
+        
         # 显示调试信息
         _show_debug_info(app)
-        raise Exception(f"数据库连接失败: {e}")
+        
+        # 不抛出异常，让应用继续运行
+        return mongo
 
 def _get_mongo_uri(app):
-    """获取MongoDB连接URI - 简化版"""
+    """获取MongoDB连接URI"""
     
     # 按优先级顺序检查环境变量
     uri_sources = [
@@ -92,12 +115,15 @@ def _get_mongo_uri(app):
             return uri
     
     # 如果都没有找到
-    app.logger.warning("⚠️ 未找到云数据库配置，使用本地默认")
-    return 'mongodb://localhost:27017/programmer_roadmap'
+    app.logger.warning("⚠️ 未找到云数据库配置")
+    return None
 
 def _create_indexes(app):
     """创建必要的数据库索引"""
     try:
+        if not _db_available or not mongo.db:
+            return
+            
         # 用户集合索引
         mongo.db.users.create_index([("username", 1)], unique=True)
         mongo.db.users.create_index([("email", 1)], unique=True)
@@ -137,7 +163,13 @@ def _show_debug_info(app):
     
     if found_vars == 0:
         app.logger.error("❌ 未找到任何MongoDB环境变量")
-        app.logger.error("💡 请确保在Railway中添加了MongoDB服务")
+    
+    # Railway 环境特殊提示
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        app.logger.error("🚂 Railway环境故障排除:")
+        app.logger.error("  1. 检查MongoDB服务是否完全启动")
+        app.logger.error("  2. 尝试重启MongoDB服务")
+        app.logger.error("  3. 考虑使用外部MongoDB服务")
 
 def _mask_uri(uri):
     """隐藏URI中的敏感信息"""
@@ -152,26 +184,57 @@ def _mask_uri(uri):
     except:
         return 'mongodb://***'
 
+def is_db_available():
+    """检查数据库是否可用"""
+    return _db_available and mongo.available
+
+def db_operation_wrapper(operation_name):
+    """数据库操作装饰器"""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            if not is_db_available():
+                return {
+                    'success': False,
+                    'message': f'数据库服务暂不可用，请稍后重试',
+                    'error_code': 'DB_UNAVAILABLE',
+                    'operation': operation_name
+                }
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                return {
+                    'success': False,
+                    'message': f'数据库操作失败: {str(e)}',
+                    'error_code': 'DB_OPERATION_FAILED',
+                    'operation': operation_name
+                }
+        return wrapper
+    return decorator
+
 def check_connection():
     """检查数据库连接状态"""
+    if not is_db_available():
+        return False, None
+        
     try:
-        if not _client:
-            return False, None
-        
         start_time = time.time()
-        result = _client.admin.command('ping')
+        result = _client.server_info()
         response_time = (time.time() - start_time) * 1000
-        
-        return result.get('ok') == 1, response_time
+        return True, response_time
     except Exception:
         return False, None
 
 def get_db_stats():
     """获取数据库统计信息"""
+    if not is_db_available():
+        return {
+            'database': 'unavailable',
+            'collections': {},
+            'collections_count': 0,
+            'status': 'degraded_mode'
+        }
+    
     try:
-        if not _db:
-            return None
-        
         collections = {}
         for name in _db.list_collection_names():
             collections[name] = {
@@ -181,17 +244,23 @@ def get_db_stats():
         return {
             'database': _db.name,
             'collections': collections,
-            'collections_count': len(collections)
+            'collections_count': len(collections),
+            'status': 'healthy'
         }
     except Exception:
-        return None
+        return {
+            'database': 'error',
+            'collections': {},
+            'collections_count': 0,
+            'status': 'error'
+        }
 
 def cleanup_expired_data():
     """清理过期数据"""
+    if not is_db_available():
+        return {'recommendations_cleaned': 0, 'feedback_cleaned': 0}
+    
     try:
-        if not _db:
-            return {'recommendations_cleaned': 0, 'feedback_cleaned': 0}
-        
         # 清理30天前的推荐
         from datetime import timedelta
         cutoff_date = datetime.utcnow() - timedelta(days=30)
@@ -216,16 +285,26 @@ def health_check():
     try:
         if not _client or not _db:
             return {
-                'status': 'error',
-                'message': 'MongoDB未初始化',
+                'status': 'degraded',
+                'message': 'MongoDB未初始化，应用运行在降级模式',
+                'database_available': False,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+        
+        if not is_db_available():
+            return {
+                'status': 'degraded',
+                'message': 'MongoDB连接失败，应用运行在降级模式',
+                'database_available': False,
                 'timestamp': datetime.utcnow().isoformat()
             }
         
         is_connected, response_time = check_connection()
         if not is_connected:
             return {
-                'status': 'error',
-                'message': 'MongoDB连接失败',
+                'status': 'degraded',
+                'message': 'MongoDB连接测试失败',
+                'database_available': False,
                 'timestamp': datetime.utcnow().isoformat()
             }
         
@@ -238,12 +317,14 @@ def health_check():
                 'response_time_ms': round(response_time, 2) if response_time else None
             },
             'database': _db.name,
-            'collections_count': stats['collections_count'] if stats else 0,
+            'collections_count': stats['collections_count'],
+            'database_available': True,
             'timestamp': datetime.utcnow().isoformat()
         }
     except Exception as e:
         return {
             'status': 'error',
             'message': str(e),
+            'database_available': False,
             'timestamp': datetime.utcnow().isoformat()
         }
