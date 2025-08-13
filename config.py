@@ -1,4 +1,4 @@
-# config.py - Railway兼容版本
+# config.py - Railway 优化版本
 import os
 from dotenv import load_dotenv
 
@@ -12,22 +12,25 @@ class Config:
     SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
     DEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'
     
-    # MongoDB 配置 - Railway兼容
-    # Railway提供MONGO_URL，备用MONGODB_URI
-    MONGO_URI = (os.environ.get('MONGO_URL') or 
-                 os.environ.get('MONGODB_URI') or 
-                 'mongodb://localhost:27017/programmer_roadmap')
-    MONGO_DBNAME = os.environ.get('MONGODB_DATABASE') or 'programmer_roadmap'
+    # MongoDB 配置 - Railway 简化版
+    # Railway MongoDB 服务提供 MONGO_URL，这是最标准的方式
+    MONGO_URI = (
+        os.environ.get('MONGO_URL') or           # Railway MongoDB 服务默认提供
+        os.environ.get('DATABASE_URL') or        # 通用数据库变量
+        os.environ.get('MONGODB_URI') or         # 备用选项
+        'mongodb://localhost:27017/programmer_roadmap'  # 本地开发默认
+    )
+    
+    MONGO_DBNAME = 'programmer_roadmap'
     
     # API配置
     API_VERSION = os.environ.get('API_VERSION', 'v1')
     
     # CORS配置
-    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', '').split(',') if os.environ.get('CORS_ORIGINS') else ['*']
+    CORS_ORIGINS = ['*']  # 生产环境应该设置具体域名
     
     # 日志配置
     LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO')
-    LOG_FILE = os.environ.get('LOG_FILE', 'logs/app.log')
 
 class DevelopmentConfig(Config):
     """开发环境配置"""
@@ -36,6 +39,8 @@ class DevelopmentConfig(Config):
 class ProductionConfig(Config):
     """生产环境配置"""
     DEBUG = False
+    # 生产环境的安全配置
+    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', '').split(',') if os.environ.get('CORS_ORIGINS') else ['*']
 
 class TestingConfig(Config):
     """测试环境配置"""
@@ -48,10 +53,15 @@ config = {
     'development': DevelopmentConfig,
     'production': ProductionConfig,
     'testing': TestingConfig,
-    'default': DevelopmentConfig
+    'default': ProductionConfig  # Railway 默认使用生产配置
 }
 
 def get_config():
     """获取当前环境配置"""
-    env = os.environ.get('FLASK_ENV', 'development')
+    # Railway 环境检测
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        return ProductionConfig
+    
+    # 其他环境
+    env = os.environ.get('FLASK_ENV', 'production')
     return config.get(env, config['default'])

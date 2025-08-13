@@ -1,4 +1,4 @@
-# app/__init__.py
+# app/__init__.py - Railway 优化版本
 from flask import Flask
 from flask_cors import CORS
 from app.utils.database import init_db
@@ -17,15 +17,18 @@ def create_app():
     # 启用CORS
     CORS(app, origins=app.config.get('CORS_ORIGINS', ['*']))
     
+    # 配置日志
+    _setup_logging(app)
+    
     # 初始化数据库
     try:
         init_db(app)
+        app.logger.info("✅ 数据库初始化成功")
     except Exception as e:
-        print(f"❌ 数据库初始化失败: {e}")
-        raise e
-    
-    # 配置日志
-    _setup_logging(app)
+        app.logger.error(f"❌ 数据库初始化失败: {e}")
+        # 在生产环境中，如果数据库连接失败，应该让应用启动失败
+        if not app.config.get('DEBUG'):
+            raise e
     
     # 注册蓝图
     _register_blueprints(app)
@@ -36,7 +39,7 @@ def create_app():
     # 注册健康检查端点
     _register_health_check(app)
     
-    print(f"✅ Flask应用创建成功")
+    app.logger.info("✅ Flask应用创建成功")
     return app
 
 def _register_blueprints(app):
@@ -56,10 +59,10 @@ def _register_blueprints(app):
         app.register_blueprint(responses_bp, url_prefix=f"{api_prefix}/responses")
         app.register_blueprint(recommendations_bp, url_prefix=f"{api_prefix}/recommendations")
         
-        print("✅ 所有蓝图注册完成")
+        app.logger.info("✅ 所有蓝图注册完成")
         
     except ImportError as e:
-        print(f"❌ 蓝图导入失败: {e}")
+        app.logger.error(f"❌ 蓝图导入失败: {e}")
         raise e
 
 def _register_error_handlers(app):
@@ -96,26 +99,35 @@ def _register_error_handlers(app):
         return {
             'success': False,
             'message': '服务器内部错误',
-            'error': str(error)
+            'error': str(error) if app.config.get('DEBUG') else 'Internal server error'
         }, 500
 
 def _setup_logging(app):
     """配置日志"""
-    if not app.debug:
-        # 创建logs目录
-        if not os.path.exists('logs'):
-            os.mkdir('logs')
+    # Railway 环境使用标准输出
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        # 生产环境日志配置
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s %(name)s %(levelname)s: %(message)s'
+        )
+        app.logger.setLevel(logging.INFO)
+    else:
+        # 开发环境保留文件日志
+        if not app.debug and not os.path.exists('logs'):
+            os.makedirs('logs', exist_ok=True)
         
-        # 配置文件日志
-        file_handler = logging.FileHandler('logs/programmer_roadmap.log')
-        file_handler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-        ))
-        file_handler.setLevel(logging.INFO)
-        app.logger.addHandler(file_handler)
+        if not app.debug:
+            file_handler = logging.FileHandler('logs/programmer_roadmap.log')
+            file_handler.setFormatter(logging.Formatter(
+                '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+            ))
+            file_handler.setLevel(logging.INFO)
+            app.logger.addHandler(file_handler)
         
         app.logger.setLevel(logging.INFO)
-        app.logger.info('ProgrammerRoadmap API startup')
+    
+    app.logger.info('ProgrammerRoadmap API 启动')
 
 def _register_health_check(app):
     """注册健康检查端点"""
@@ -126,6 +138,7 @@ def _register_health_check(app):
             'message': 'ProgrammerRoadmap API is running!',
             'version': app.config.get('API_VERSION', 'v1'),
             'service': 'ProgrammerRoadmap API',
+            'status': 'healthy',
             'endpoints': {
                 'health': '/health',
                 'auth': '/api/v1/auth',
@@ -138,19 +151,19 @@ def _register_health_check(app):
     @app.route('/health')
     def health_check():
         try:
-            from app.utils.database import check_connection
-            is_connected, response_time = check_connection()
+            from app.utils.database import health_check as db_health_check
+            
+            db_health = db_health_check()
             
             return {
-                'status': 'healthy' if is_connected else 'unhealthy',
+                'status': 'healthy' if db_health['status'] == 'healthy' else 'unhealthy',
                 'service': 'ProgrammerRoadmap API',
                 'version': app.config.get('API_VERSION', 'v1'),
-                'database': {
-                    'status': 'connected' if is_connected else 'disconnected',
-                    'response_time_ms': response_time if response_time else None
-                }
+                'database': db_health,
+                'timestamp': db_health.get('timestamp')
             }
         except Exception as e:
+            app.logger.error(f"Health check failed: {e}")
             return {
                 'status': 'error',
                 'message': str(e),

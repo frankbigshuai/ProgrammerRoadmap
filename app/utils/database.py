@@ -1,4 +1,4 @@
-# app/utils/database.py - MongoDB变量调试版
+# app/utils/database.py - Railway 优化版本
 import pymongo
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -19,222 +19,197 @@ class MongoWrapper:
 mongo = MongoWrapper()
 
 def init_db(app):
-    """初始化数据库连接 - 调试版"""
+    """初始化数据库连接 - Railway 优化版"""
     global _client, _db, mongo
     
     try:
-        app.logger.info("🔄 调试MongoDB连接...")
-        
-        # 显示所有MongoDB相关变量的实际值（用于调试）
-        _debug_mongo_variables(app)
+        app.logger.info("🔄 初始化MongoDB连接...")
         
         # 获取连接URI
-        mongo_uri = _get_correct_mongo_uri(app)
+        mongo_uri = _get_mongo_uri(app)
         if not mongo_uri:
-            raise ValueError("❌ 无法获取MongoDB连接")
+            raise ValueError("❌ 无法获取MongoDB连接配置")
         
-        # 显示将要使用的连接信息
-        app.logger.info(f"📡 尝试连接: {_mask_uri(mongo_uri)}")
+        # 显示连接信息（隐藏敏感信息）
+        app.logger.info(f"📡 连接数据库: {_mask_uri(mongo_uri)}")
         
         # 创建客户端
-        _client = MongoClient(mongo_uri, 
-                             connectTimeoutMS=10000,
-                             serverSelectionTimeoutMS=10000,
-                             socketTimeoutMS=10000)
+        _client = MongoClient(
+            mongo_uri,
+            connectTimeoutMS=10000,
+            serverSelectionTimeoutMS=10000,
+            socketTimeoutMS=20000,
+            maxPoolSize=10,
+            retryWrites=True
+        )
         
         # 选择数据库
         _db = _client['programmer_roadmap']
         
         # 测试连接
-        app.logger.info("🏓 测试认证...")
+        app.logger.info("🏓 测试数据库连接...")
         result = _client.admin.command('ping')
         if result.get('ok') == 1:
-            app.logger.info("✅ MongoDB连接和认证成功!")
+            app.logger.info("✅ MongoDB连接成功!")
         
         # 设置全局对象
         mongo.db = _db
         mongo.cx = _client
         
+        # 创建必要的索引
+        _create_indexes(app)
+        
         return mongo
         
     except Exception as e:
         app.logger.error(f"❌ MongoDB连接失败: {e}")
-        # 显示可能的解决方案
-        _show_auth_troubleshooting(app)
+        # 显示调试信息
+        _show_debug_info(app)
         raise Exception(f"数据库连接失败: {e}")
 
-def _debug_mongo_variables(app):
-    """调试MongoDB相关变量"""
+def _get_mongo_uri(app):
+    """获取MongoDB连接URI - 简化版"""
     
-    app.logger.info("🔍 MongoDB变量调试信息:")
-    
-    # 所有可能的MongoDB变量名
-    mongo_var_names = [
-        'MONGO_URL',
-        'MONGO_URI', 
-        'MONGODB_URI',
-        'DATABASE_URL',
-        'MONGOHOST',
-        'MONGOPORT',
-        'MONGOUSER',
-        'MONGOPASSWORD',
-        'MONGO_INITDB_ROOT_USERNAME',
-        'MONGO_INITDB_ROOT_PASSWORD',
-        'MONGO_INITDB_DATABASE',
-        'MONGO_INITDB_HOST',
-        'MONGO_INITDB_PORT'
+    # 按优先级顺序检查环境变量
+    uri_sources = [
+        ('MONGO_URL', 'Railway MongoDB服务'),
+        ('DATABASE_URL', '通用数据库变量'),
+        ('MONGODB_URI', 'MongoDB标准变量'),
+        ('MONGO_URI', '自定义变量')
     ]
     
-    found_vars = {}
-    for var_name in mongo_var_names:
-        value = os.environ.get(var_name)
-        if value:
-            # 对密码类变量进行部分隐藏
-            if 'password' in var_name.lower() or 'pass' in var_name.lower():
-                display_value = f"{value[:4]}***{value[-4:]}" if len(value) > 8 else "***"
-            else:
-                display_value = value
+    for var_name, description in uri_sources:
+        uri = os.environ.get(var_name)
+        if uri and uri.startswith('mongodb'):
+            app.logger.info(f"✅ 使用 {description}: {var_name}")
             
-            found_vars[var_name] = display_value
-            app.logger.info(f"  ✅ {var_name}: {display_value}")
-        else:
-            app.logger.info(f"  ❌ {var_name}: 未设置")
+            # 确保包含数据库名
+            if '/programmer_roadmap' not in uri and not uri.endswith('/'):
+                uri += '/programmer_roadmap'
+            elif uri.endswith('/') and 'programmer_roadmap' not in uri:
+                uri += 'programmer_roadmap'
+            
+            return uri
     
-    app.logger.info(f"📊 找到 {len(found_vars)} 个MongoDB变量")
-    
-    # 如果没有找到任何变量，显示所有环境变量中包含mongo的
-    if not found_vars:
-        app.logger.warning("⚠️ 未找到标准MongoDB变量，搜索所有相关变量:")
-        for key, value in os.environ.items():
-            if 'mongo' in key.lower():
-                display_value = f"{value[:10]}..." if len(value) > 10 else value
-                app.logger.info(f"  🔍 {key}: {display_value}")
+    # 如果都没有找到
+    app.logger.warning("⚠️ 未找到云数据库配置，使用本地默认")
+    return 'mongodb://localhost:27017/programmer_roadmap'
 
-def _get_correct_mongo_uri(app):
-    """获取正确的MongoDB URI"""
-    
-    # 方法1: 检查用户手动设置的MONGO_URI
-    mongo_uri = os.environ.get('MONGO_URI')
-    if mongo_uri and mongo_uri.startswith('mongodb://'):
-        app.logger.info("✅ 使用手动设置的MONGO_URI")
-        return mongo_uri
-    
-    # 方法2: 使用Railway自动提供的变量
-    railway_combinations = [
-        # 组合1: 使用MONGO_URL
-        {
-            'source': 'MONGO_URL',
-            'uri': os.environ.get('MONGO_URL')
-        },
-        # 组合2: 使用标准Railway变量
-        {
-            'source': 'Railway标准变量',
-            'host': os.environ.get('MONGOHOST'),
-            'port': os.environ.get('MONGOPORT', '27017'),
-            'user': os.environ.get('MONGO_INITDB_ROOT_USERNAME'),
-            'pass': os.environ.get('MONGO_INITDB_ROOT_PASSWORD')
-        },
-        # 组合3: 使用简化变量名
-        {
-            'source': 'Railway简化变量',
-            'host': os.environ.get('MONGOHOST'),
-            'port': os.environ.get('MONGOPORT', '27017'),
-            'user': os.environ.get('MONGOUSER'),
-            'pass': os.environ.get('MONGOPASSWORD')
-        }
-    ]
-    
-    for combo in railway_combinations:
-        if 'uri' in combo and combo['uri']:
-            # 直接使用提供的URI
-            uri = combo['uri']
-            if uri.startswith('mongodb://'):
-                # 确保包含数据库名
-                if '/programmer_roadmap' not in uri:
-                    if uri.endswith('/'):
-                        uri += 'programmer_roadmap'
-                    else:
-                        uri += '/programmer_roadmap'
-                app.logger.info(f"✅ 使用{combo['source']}")
-                return uri
+def _create_indexes(app):
+    """创建必要的数据库索引"""
+    try:
+        # 用户集合索引
+        mongo.db.users.create_index([("username", 1)], unique=True)
+        mongo.db.users.create_index([("email", 1)], unique=True)
         
-        elif all(key in combo for key in ['host', 'user', 'pass']):
-            # 从分离变量构建URI
-            host = combo['host']
-            port = combo['port']
-            user = combo['user'] 
-            password = combo['pass']
-            
-            if all([host, user, password]):
-                uri = f"mongodb://{user}:{password}@{host}:{port}/programmer_roadmap"
-                app.logger.info(f"✅ 从{combo['source']}构建URI")
-                return uri
-    
-    app.logger.error("❌ 无法构建有效的MongoDB URI")
-    return None
+        # 问题集合索引
+        mongo.db.questions.create_index([("question_id", 1)], unique=True)
+        mongo.db.questions.create_index([("category", 1), ("order", 1)])
+        
+        # 答案集合索引
+        mongo.db.responses.create_index([("user_id", 1), ("question_id", 1)], unique=True)
+        mongo.db.responses.create_index([("user_id", 1)])
+        
+        # 推荐集合索引
+        mongo.db.recommendations.create_index([("user_id", 1)])
+        mongo.db.recommendations.create_index([("created_at", 1)])
+        
+        app.logger.info("✅ 数据库索引创建完成")
+        
+    except Exception as e:
+        app.logger.warning(f"⚠️ 索引创建失败: {e}")
 
-def _show_auth_troubleshooting(app):
-    """显示认证故障排除信息"""
+def _show_debug_info(app):
+    """显示调试信息"""
+    app.logger.error("🔍 调试信息:")
     
-    app.logger.error("🔐 认证失败故障排除:")
-    app.logger.error("  1. 检查Railway MongoDB服务是否正常运行")
-    app.logger.error("  2. 确认用户名和密码正确")
-    app.logger.error("  3. 重启MongoDB服务")
-    app.logger.error("  4. 检查变量是否从MongoDB服务正确传递")
+    # 检查关键环境变量
+    mongo_vars = ['MONGO_URL', 'DATABASE_URL', 'MONGODB_URI', 'MONGO_URI']
+    found_vars = 0
     
-    app.logger.error("💡 建议的修复步骤:")
-    app.logger.error("  1. 进入Railway MongoDB服务页面")
-    app.logger.error("  2. 查看Variables标签页的实际值")
-    app.logger.error("  3. 复制正确的连接信息")
-    app.logger.error("  4. 手动设置MONGO_URI环境变量")
+    for var in mongo_vars:
+        value = os.environ.get(var)
+        if value:
+            found_vars += 1
+            app.logger.error(f"  ✅ {var}: {_mask_uri(value)}")
+        else:
+            app.logger.error(f"  ❌ {var}: 未设置")
     
-    # 显示建议的URI格式
-    host = os.environ.get('MONGOHOST', 'mongodb-tyss.railway.internal')
-    app.logger.error(f"  建议格式: mongodb://用户名:密码@{host}:27017/programmer_roadmap")
+    if found_vars == 0:
+        app.logger.error("❌ 未找到任何MongoDB环境变量")
+        app.logger.error("💡 请确保在Railway中添加了MongoDB服务")
 
 def _mask_uri(uri):
-    """隐藏敏感信息"""
+    """隐藏URI中的敏感信息"""
     try:
         if '@' in uri:
             parts = uri.split('@')
             if len(parts) >= 2:
-                protocol = parts[0].split('//')[0]
-                return f"{protocol}//***:***@{parts[1]}"
-        return uri[:50] + '...'
+                protocol_part = parts[0].split('//')
+                if len(protocol_part) >= 2:
+                    return f"{protocol_part[0]}//***:***@{parts[1]}"
+        return uri[:20] + '...' if len(uri) > 20 else uri
     except:
         return 'mongodb://***'
 
 def check_connection():
-    """检查连接"""
+    """检查数据库连接状态"""
     try:
         if not _client:
             return False, None
+        
         start_time = time.time()
         result = _client.admin.command('ping')
         response_time = (time.time() - start_time) * 1000
+        
         return result.get('ok') == 1, response_time
-    except:
+    except Exception:
         return False, None
 
 def get_db_stats():
-    """获取统计"""
+    """获取数据库统计信息"""
     try:
         if not _db:
             return None
+        
+        collections = {}
+        for name in _db.list_collection_names():
+            collections[name] = {
+                'count': _db[name].count_documents({})
+            }
+        
         return {
             'database': _db.name,
-            'collections': {name: {'count': _db[name].count_documents({})} 
-                          for name in _db.list_collection_names()},
-            'total_size': 0
+            'collections': collections,
+            'collections_count': len(collections)
         }
-    except:
+    except Exception:
         return None
 
 def cleanup_expired_data():
-    return {'recommendations_cleaned': 0, 'feedback_cleaned': 0}
-
-def backup_collection(collection_name, backup_path=None):
-    return None
+    """清理过期数据"""
+    try:
+        if not _db:
+            return {'recommendations_cleaned': 0, 'feedback_cleaned': 0}
+        
+        # 清理30天前的推荐
+        from datetime import timedelta
+        cutoff_date = datetime.utcnow() - timedelta(days=30)
+        
+        rec_result = _db.recommendations.delete_many({
+            'created_at': {'$lt': cutoff_date}
+        })
+        
+        feedback_result = _db.recommendation_feedback.delete_many({
+            'submitted_at': {'$lt': cutoff_date}
+        })
+        
+        return {
+            'recommendations_cleaned': rec_result.deleted_count,
+            'feedback_cleaned': feedback_result.deleted_count
+        }
+    except Exception:
+        return {'recommendations_cleaned': 0, 'feedback_cleaned': 0}
 
 def health_check():
     """健康检查"""
@@ -254,10 +229,16 @@ def health_check():
                 'timestamp': datetime.utcnow().isoformat()
             }
         
+        stats = get_db_stats()
+        
         return {
             'status': 'healthy',
-            'connection': {'connected': True, 'response_time_ms': round(response_time, 2)},
+            'connection': {
+                'connected': True,
+                'response_time_ms': round(response_time, 2) if response_time else None
+            },
             'database': _db.name,
+            'collections_count': stats['collections_count'] if stats else 0,
             'timestamp': datetime.utcnow().isoformat()
         }
     except Exception as e:
